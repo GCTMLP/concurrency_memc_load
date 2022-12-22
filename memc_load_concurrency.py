@@ -56,48 +56,53 @@ class ToMemcache(Thread):
                 break
             else:
                 # Вставляем данные в мемкеш (подсчитываем ошибки и профиты)
+                # Сериализация данных
+                data_to_paste = {}
                 for appsinstalled in data_part:
-                    if self.insert_appsinstalled(appsinstalled):
-                        processed += 1
-                    else:
-                        errors += 1
+                    ua = appsinstalled_pb2.UserApps()
+                    ua.lat = appsinstalled.lat
+                    ua.lon = appsinstalled.lon
+                    key = "%s:%s" % (appsinstalled.dev_type, appsinstalled.dev_id)
+                    ua.apps.extend(appsinstalled.apps)
+                    packed = ua.SerializeToString()
+                    data_to_paste[key] = packed
+                processed, errors = self.insert_appsinstalled(data_to_paste)
 
-    def insert_appsinstalled(self, appsinstalled):
+
+    def insert_appsinstalled(self, data_to_paste):
         """
         Метод сериализации данных и отправки их в мемкеш
         """
-        # Сериализация данных
-        ua = appsinstalled_pb2.UserApps()
-        ua.lat = appsinstalled.lat
-        ua.lon = appsinstalled.lon
-        key = "%s:%s" % (appsinstalled.dev_type, appsinstalled.dev_id)
-        ua.apps.extend(appsinstalled.apps)
-        packed = ua.SerializeToString()
+        processed = errors = 0
         # Вставка данных
         try:
             if self.dry:
-                logging.debug("%s - %s -> %s" % (self.memc, key, str(ua).replace("\n", " ")))
-                return True
+                for key, value in data_to_paste.items():
+                    logging.debug("%s - %s -> %s" % (self.memc, key, str(value).replace("\n", " ")))
+                    processed += 1
             else:
                 # вызываем метод вставки данных в мемкеш
-                return self.memc_set(key, packed)
+                 processed, errors = self.memc_set(data_to_paste)
         except Exception as e:
             logging.exception("Cannot write to memc %s: %s" % (self.memc, e))
             return False
+        return processed, errors
 
-    def memc_set(self, key, packed):
+
+    def memc_set(self, data_to_paste):
         """
         метод вставки данных в мемкеш с
         """
         trying = 0
-        while trying < MAX_TRIES:
+        failed = self.memc.set_multi(data_to_paste)
+        while failed and trying < MAX_TRIES:
+            failed = self.memc.set_multi({
+                key: data_to_paste[key]
+                for key in failed
+            })
             trying += 1
-            if self.memc.set(key, packed):
-                break
-            time.sleep(TIMEOUT)
-        else:
-            return False
-        return True
+            time.sleep(0.5)
+        return len(data_to_paste.keys()) - len(failed), len(failed)
 
 
 def dot_rename(path):
